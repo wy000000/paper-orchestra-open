@@ -31,6 +31,21 @@ from utils.gemini_utils import (
 cur_dir = os.path.dirname(os.path.realpath(__file__))
 PB_DIR = os.path.join(cur_dir, "../../PaperBanana")
 
+
+def _guess_image_mime_from_bytes(data: bytes) -> str:
+    """Detects an image MIME type from its magic bytes."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith(b"BM"):
+        return "image/bmp"
+    return "image/jpeg"
+
 # ==========================================
 # PROMPTS
 # ==========================================
@@ -433,10 +448,12 @@ def generate_figure_caption(
     }
 
     if base64_image and len(base64_image) > 100:
+        image_bytes = base64.b64decode(base64_image)
         contents = [
             types.Part.from_text(text=prompt),
             types.Part.from_bytes(
-                data=base64.b64decode(base64_image), mime_type="image/jpeg"
+                data=image_bytes,
+                mime_type=_guess_image_mime_from_bytes(image_bytes),
             ),
         ]
         response_dict = call_gemini_with_contents(
@@ -503,12 +520,13 @@ def predict_figure_content(
         )
         if os.path.exists(image_path):
             with open(image_path, "rb") as f:
-                ref_image_base64 = base64.b64encode(f.read()).decode("utf-8")
-                contents.append(
-                    types.Part.from_bytes(
-                        data=base64.b64decode(ref_image_base64), mime_type="image/jpeg"
-                    )
+                ref_image_bytes = f.read()
+            contents.append(
+                types.Part.from_bytes(
+                    data=ref_image_bytes,
+                    mime_type=_guess_image_mime_from_bytes(ref_image_bytes),
                 )
+            )
 
         user_prompt = ""
 
@@ -600,9 +618,11 @@ def critique_and_revise_figure(
     ]
 
     if base64_image and len(base64_image) > 100:
+        image_bytes = base64.b64decode(base64_image)
         contents.append(
             types.Part.from_bytes(
-                data=base64.b64decode(base64_image), mime_type="image/jpeg"
+                data=image_bytes,
+                mime_type=_guess_image_mime_from_bytes(image_bytes),
             )
         )
     else:

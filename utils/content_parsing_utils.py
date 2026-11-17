@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .gemini_utils import call_gemini_with_text_prompt
+from . import model_config
 
 extract_title_prompt_template = """You are an expert bibliographic parser. Extract the full research paper title from the messy citation text below.
 
@@ -38,6 +39,7 @@ def extract_paper_title_from_citation(citation_text: str):
     response_dict = call_gemini_with_text_prompt(
         prompt=instruction,
         model_name="gemini-3-flash-preview",
+        model_role=model_config.LIGHT_ROLE,
         check_parsed_response_not_none=False,
     )
     return response_dict["raw_response"].strip()

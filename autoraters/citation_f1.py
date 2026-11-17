@@ -29,6 +29,7 @@ from utils.pdf_utils import get_paper_references_from_pdf, load_paper
 from utils.common_utils import create_log_folder
 from utils.content_parsing_utils import extract_paper_title_from_citation
 from utils.llm_backend_utils import call_llm_with_text_prompt
+from utils import model_config
 
 from dotenv import load_dotenv  # type: ignore
 
@@ -36,9 +37,6 @@ dot_file = os.path.join(os.path.dirname(__file__), "../.env")
 load_dotenv(dot_file)
 
 DATASET_DIR = os.path.join(os.path.dirname(__file__), "../datasets")
-
-S2_API_KEY = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
-print(f"Loaded S2 API Key for this project: {S2_API_KEY}")
 
 PRIORITY_PROMPT = """You are an expert academic reviewer. Read the following paper text and analyze its references.
 Your goal is to categorize the provided references into two priorities:
@@ -74,12 +72,14 @@ Example output:
 class ReferenceF1V1Evaluator:
     def __init__(
         self,
-        api_key: str = S2_API_KEY,
+        api_key: str = None,
         log_folder: str = None,
         model_name: str = "gemini-3.1-pro-preview",
     ):
         # Semantic Scholar API endpoint
         self.S2_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+        if api_key is None:
+            api_key = model_config.get_semantic_scholar_api_key()
         self.headers = {"X-API-KEY": api_key} if api_key else {}
         self.model_name = model_name
 

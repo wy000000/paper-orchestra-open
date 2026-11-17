@@ -27,6 +27,7 @@ from methods.prompts.literature_review_agent import (
 )
 from utils.gemini_utils import call_gemini_with_contents, parse_gemini_latex_results
 from utils.scholar_utils import s2_title_search
+from utils import model_config
 
 
 class CandidatePaper(BaseModel):
@@ -463,6 +464,7 @@ class HybridLiteratureAgent:
 
         response_dict = call_gemini_with_contents(
             model_name="gemini-3-flash-preview",
+            model_role=model_config.LIGHT_ROLE,
             contents=[prompt],
             generation_configs={
                 "tools": [self.google_search_tool],

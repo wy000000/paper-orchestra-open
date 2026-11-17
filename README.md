@@ -33,6 +33,7 @@ Acting like an orchestrated team of specialized agents, it handles outline gener
     # You need to specify related keys if you want to use the model
     # For example, if you want to use Gemini models, you need to specify either VERTEX_AI_PROJECT and VERTEX_AI_LOCATION, or GEMINI_API_KEY
     # If you want to use OpenAI models, you need to specify OPENAI_API_KEY
+    # SEMANTIC_SCHOLAR_API_KEY is optional and can also be set in model_config.yaml
     
     SEMANTIC_SCHOLAR_API_KEY=your_semantic_scholar_api_key
     OPENAI_API_KEY=your_openai_api_key
@@ -44,6 +45,47 @@ Acting like an orchestrated team of specialized agents, it handles outline gener
     SMTP_EMAIL=your_email
     SMTP_PASSWORD=your_password
     ```
+
+3.  **Optional: Third-party Model Endpoints and API Settings**: PaperOrchestra can route its three logical model roles to third-party or self-hosted APIs. Copy the template and edit it:
+    ```bash
+    cp model_config.example.yaml model_config.yaml
+    ```
+
+    ```yaml
+    main:   # writer / reflection / plotting LLMs
+      enabled: true
+      base_url: "https://api.example.com/v1"
+      model_name: "gpt-5"
+      api_key: "${MAIN_API_KEY}"
+      api_style: "openai"
+
+    light:  # lightweight tasks (flash-level calls)
+      enabled: false
+      base_url: "https://api.example.com/v1"
+      model_name: "gpt-5-mini"
+      api_key: "${LIGHT_API_KEY}"
+      api_style: "openai"
+
+    image:  # plotting agent image generation
+      enabled: false
+      base_url: "https://api.example.com/v1"
+      model_name: "gpt-image-1"
+      api_key: "${IMAGE_API_KEY}"
+      api_style: "openai"
+
+    semantic_scholar:  # optional; anonymous access works with stricter limits
+      api_key: "${SEMANTIC_SCHOLAR_API_KEY}"
+    ```
+
+    * `model_config.yaml` is gitignored; only the example file is committed.
+    * `api_key` supports `${ENV_VAR}` references. If it is empty, the loader falls back to `MAIN_API_KEY`, `LIGHT_API_KEY`, or `IMAGE_API_KEY`.
+    * `api_style` is optional and defaults to `openai`. Use `gemini` for Gemini-compatible endpoints (include the API version in `base_url`, e.g. `https://relay.example.com/v1beta`).
+    * Disabled roles or a missing file keep the original `.env` / CLI behaviour.
+    * When a role is enabled, its `model_name` overrides the corresponding CLI model flag.
+    * The `semantic_scholar.api_key` value takes precedence over `SEMANTIC_SCHOLAR_API_KEY` in `.env`. Anonymous Semantic Scholar access works but is heavily rate-limited; a free key is recommended.
+    * The `light` role currently only powers two calls: (1) candidate paper discovery in the literature agent (`methods/agents/literature_review_agent.py`, which passes the Google Search tool) and (2) citation-title extraction in `autoraters/citation_f1.py`. It does not write, reflect, plot, evaluate PDFs, or generate images.
+    * **Google Search grounding is Gemini-only.** If `light` uses an `openai`-style endpoint, the discovery call automatically falls back to native Gemini and prints one warning: `WARNING: Role 'light' uses an OpenAI-compatible endpoint, but this call requires Google Search grounding. Falling back to native Gemini for this call.` In that setup `GEMINI_API_KEY` (or Vertex AI credentials) is still required, and the configured `light` endpoint is only used for citation-title extraction — the main generation pipeline does not use it. With `api_style: gemini`, grounding works whenever the relay supports it.
+    * Set `PAPER_ORCHESTRA_CONFIG=/path/to/file.yaml` to use a config file outside the project root.
 
 ## Dataset
 

@@ -7,6 +7,7 @@ openai
 opencv-python
 pydantic
 PyMuPDF
+PyYAML
 pymupdf4llm
 pyOpenSSL
 pypdf

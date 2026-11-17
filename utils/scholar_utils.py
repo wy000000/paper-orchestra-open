@@ -22,10 +22,10 @@ import datetime
 
 from dotenv import load_dotenv  # type: ignore
 
+from utils import model_config
+
 cur_dir = os.path.dirname(os.path.realpath(__file__))
 load_dotenv(os.path.join(cur_dir, "../.env"))
-S2_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
-print(f"Using S2 API Key: {S2_API_KEY}")
 
 
 # --- SEMANTIC SCHOLAR UTILS ---
@@ -34,7 +34,8 @@ print(f"Using S2 API Key: {S2_API_KEY}")
 def s2_title_search(
     title_query: str, year_hint: int = None, cutoff_date: str = None
 ) -> Optional[Dict]:
-    headers = {"X-API-KEY": S2_API_KEY} if S2_API_KEY else {}
+    api_key = model_config.get_semantic_scholar_api_key()
+    headers = {"X-API-KEY": api_key} if api_key else {}
 
     def is_date_valid(p_date, p_year, cutoff_str):
         if not cutoff_str:

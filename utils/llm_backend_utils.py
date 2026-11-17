@@ -17,6 +17,7 @@ from typing import Optional, Callable, Dict, Any
 
 from google.genai import types
 
+from utils import model_config
 from utils.gemini_utils import (
     call_gemini_with_text_prompt,
     parse_gemini_json_results,
@@ -28,6 +29,7 @@ from utils.openai_utils import (
     call_openai_models_with_content,
     parse_openai_json_results,
     get_openai_image_part_from_path,
+    get_openai_client,
 )
 from utils.pdf_utils import load_paper
 
@@ -36,18 +38,23 @@ def identity_parse(response: str):
     return response
 
 
-def get_llm_parser(model_name: str, return_json: bool = True) -> Callable:
+def get_llm_parser(
+    model_name: str,
+    return_json: bool = True,
+    model_role: str = model_config.MAIN_ROLE,
+) -> Callable:
     if not return_json:
         return identity_parse
 
-    if (
-        "gpt" in model_name.lower()
-        or "o1" in model_name.lower()
-        or "o3" in model_name.lower()
-    ):
-        return parse_openai_json_results
-    else:
+    backend = model_config.resolve_backend(model_name, model_role)
+    if backend == "third_party":
+        endpoint = model_config.get_endpoint(model_role)
+        if endpoint is not None and endpoint.api_style == "openai":
+            return parse_openai_json_results
         return parse_gemini_json_results
+    if backend == "openai":
+        return parse_openai_json_results
+    return parse_gemini_json_results
 
 
 def call_llm_with_text_prompt(
@@ -57,24 +64,36 @@ def call_llm_with_text_prompt(
     check_parsed_response_not_none: bool = True,
     return_json: bool = True,
     result_parsing_func: Optional[Callable] = None,
+    model_role: str = model_config.MAIN_ROLE,
 ) -> Dict[str, Any]:
     """
-    Unified function to call either Gemini or OpenAI models based on the model_name.
+    Unified function to call Gemini, OpenAI, or a third-party endpoint.
+
+    A third-party endpoint enabled for ``model_role`` takes precedence over the
+    model-name heuristic.
     """
     parser = (
         result_parsing_func
         if result_parsing_func is not None
-        else get_llm_parser(model_name, return_json)
+        else get_llm_parser(model_name, return_json, model_role)
     )
 
     if generation_configs is None:
         generation_configs = {}
 
-    if (
-        "gpt" in model_name.lower()
-        or "o1" in model_name.lower()
-        or "o3" in model_name.lower()
-    ):
+    backend = model_config.resolve_backend(model_name, model_role)
+
+    if backend == "third_party":
+        return call_gemini_with_text_prompt(
+            prompt=prompt,
+            model_name=model_name,
+            model_role=model_role,
+            generation_configs=generation_configs,
+            result_parsing_func=parser,
+            check_parsed_response_not_none=check_parsed_response_not_none,
+        )
+
+    if backend == "openai":
         system_prompt = None
         configs_for_openai = dict(generation_configs) if generation_configs else {}
         if "system_instruction" in configs_for_openai:
@@ -91,15 +110,16 @@ def call_llm_with_text_prompt(
             system_prompt=system_prompt,
         )
         return response_dict
-    else:
-        response_dict = call_gemini_with_text_prompt(
-            prompt=prompt,
-            model_name=model_name,
-            generation_configs=generation_configs,
-            result_parsing_func=parser,
-            check_parsed_response_not_none=check_parsed_response_not_none,
-        )
-        return response_dict
+
+    response_dict = call_gemini_with_text_prompt(
+        prompt=prompt,
+        model_name=model_name,
+        model_role=model_role,
+        generation_configs=generation_configs,
+        result_parsing_func=parser,
+        check_parsed_response_not_none=check_parsed_response_not_none,
+    )
+    return response_dict
 
 
 def call_llm_with_images(
@@ -110,24 +130,35 @@ def call_llm_with_images(
     check_parsed_response_not_none: bool = True,
     return_json: bool = True,
     result_parsing_func: Optional[Callable] = None,
+    model_role: str = model_config.MAIN_ROLE,
 ) -> Dict[str, Any]:
     """
-    Unified function to call either Gemini or OpenAI models with images based on the model_name.
+    Unified function to call Gemini, OpenAI, or a third-party endpoint with
+    images. A third-party endpoint enabled for ``model_role`` takes precedence.
     """
     parser = (
         result_parsing_func
         if result_parsing_func is not None
-        else get_llm_parser(model_name, return_json)
+        else get_llm_parser(model_name, return_json, model_role)
     )
 
     if generation_configs is None:
         generation_configs = {}
 
-    if (
-        "gpt" in model_name.lower()
-        or "o1" in model_name.lower()
-        or "o3" in model_name.lower()
-    ):
+    backend = model_config.resolve_backend(model_name, model_role)
+
+    if backend == "third_party":
+        return call_gemini_with_images(
+            prompt=prompt,
+            images=images,
+            model_name=model_name,
+            model_role=model_role,
+            generation_configs=generation_configs,
+            result_parsing_func=parser,
+            check_parsed_response_not_none=check_parsed_response_not_none,
+        )
+
+    if backend == "openai":
         system_prompt = None
         # Copy to avoid side-effects on caller's dictionary
         configs_for_openai = dict(generation_configs) if generation_configs else {}
@@ -149,16 +180,17 @@ def call_llm_with_images(
             system_prompt=system_prompt,
         )
         return response_dict
-    else:
-        response_dict = call_gemini_with_images(
-            prompt=prompt,
-            images=images,
-            model_name=model_name,
-            generation_configs=generation_configs,
-            result_parsing_func=parser,
-            check_parsed_response_not_none=check_parsed_response_not_none,
-        )
-        return response_dict
+
+    response_dict = call_gemini_with_images(
+        prompt=prompt,
+        images=images,
+        model_name=model_name,
+        model_role=model_role,
+        generation_configs=generation_configs,
+        result_parsing_func=parser,
+        check_parsed_response_not_none=check_parsed_response_not_none,
+    )
+    return response_dict
 
 
 def call_llm_with_pdf(
@@ -170,22 +202,44 @@ def call_llm_with_pdf(
     check_parsed_response_not_none: bool = True,
     return_json: bool = True,
     result_parsing_func: Optional[Callable] = None,
+    model_role: str = model_config.MAIN_ROLE,
 ) -> Dict[str, Any]:
     """
     Unified function to evaluate a PDF.
-    Passes raw PDF bytes to Gemini, and extracted text to OpenAI.
+
+    Passes raw PDF bytes to Gemini, and extracted text to OpenAI/compatible
+    endpoints. A third-party endpoint enabled for ``model_role`` takes
+    precedence over the model-name heuristic.
     """
     parser = (
         result_parsing_func
         if result_parsing_func is not None
-        else get_llm_parser(model_name, return_json)
+        else get_llm_parser(model_name, return_json, model_role)
     )
 
-    if (
-        "gpt" in model_name.lower()
-        or "o1" in model_name.lower()
-        or "o3" in model_name.lower()
-    ):
+    backend = model_config.resolve_backend(model_name, model_role)
+
+    if backend == "third_party":
+        endpoint = model_config.get_endpoint(model_role)
+        if endpoint is not None and endpoint.api_style == "openai":
+            paper_text = load_paper(pdf_path, min_size=100)
+            full_prompt = f"Paper Content:\n{paper_text}\n\nTask:\n{prompt}"
+
+            return call_openai_models_with_text_prompt(
+                prompt=full_prompt,
+                model_name=endpoint.model_name,
+                generation_configs={},
+                result_parsing_func=parser,
+                check_parsed_response_not_none=check_parsed_response_not_none,
+                system_prompt=system_instruction,
+                client=get_openai_client(
+                    base_url=endpoint.base_url, api_key=endpoint.api_key
+                ),
+            )
+
+        # Gemini-compatible third-party endpoint: handled by the Gemini path.
+
+    if backend == "openai":
         paper_text = load_paper(pdf_path, min_size=100)
         full_prompt = f"Paper Content:\n{paper_text}\n\nTask:\n{prompt}"
 
@@ -199,24 +253,25 @@ def call_llm_with_pdf(
             system_prompt=system_instruction,
         )
         return response_dict
-    else:
-        with open(pdf_path, "rb") as f:
-            pdf_bytes = f.read()
 
-        contents = [
-            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-            types.Part.from_text(text=prompt),
-        ]
+    with open(pdf_path, "rb") as f:
+        pdf_bytes = f.read()
 
-        generation_configs = {"temperature": temperature}
-        if system_instruction is not None:
-            generation_configs["system_instruction"] = system_instruction
+    contents = [
+        types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+        types.Part.from_text(text=prompt),
+    ]
 
-        response_dict = call_gemini_with_contents(
-            contents=contents,
-            model_name=model_name,
-            generation_configs=generation_configs,
-            result_parsing_func=parser,
-            check_parsed_response_not_none=check_parsed_response_not_none,
-        )
-        return response_dict
+    generation_configs = {"temperature": temperature}
+    if system_instruction is not None:
+        generation_configs["system_instruction"] = system_instruction
+
+    response_dict = call_gemini_with_contents(
+        contents=contents,
+        model_name=model_name,
+        model_role=model_role,
+        generation_configs=generation_configs,
+        result_parsing_func=parser,
+        check_parsed_response_not_none=check_parsed_response_not_none,
+    )
+    return response_dict

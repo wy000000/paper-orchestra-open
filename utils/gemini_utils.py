@@ -26,20 +26,44 @@ import threading
 
 import dotenv
 
+from utils import model_config
+
 dot_file = os.path.join(os.path.dirname(__file__), "../.env")
 dotenv.load_dotenv(dot_file)
 
 _genai_client = None
 _genai_client_lock = threading.Lock()
+_custom_genai_clients = {}
 
 
-def get_genai_client() -> genai.Client:
+def get_genai_client(
+    endpoint: "model_config.ModelEndpoint | None" = None,
+) -> genai.Client:
     """Returns a shared Gemini client, creating it on first use.
 
     The client is created lazily so that Gemini credentials are only required
     when a Gemini model is actually called (e.g. OpenAI-only setups don't need
     them). Vertex AI takes precedence over GEMINI_API_KEY when both are set.
+
+    When ``endpoint`` is provided, a client for that third-party
+    Gemini-compatible base URL is returned instead.
     """
+    if endpoint is not None:
+        cache_key = (endpoint.base_url, endpoint.api_key)
+        with _genai_client_lock:
+            client = _custom_genai_clients.get(cache_key)
+            if client is None:
+                print(
+                    f"Using third-party Gemini-compatible endpoint: "
+                    f"{endpoint.base_url}"
+                )
+                client = genai.Client(
+                    api_key=endpoint.api_key,
+                    http_options=types.HttpOptions(base_url=endpoint.base_url),
+                )
+                _custom_genai_clients[cache_key] = client
+        return client
+
     global _genai_client
     if _genai_client is None:
         with _genai_client_lock:
@@ -66,6 +90,152 @@ def get_genai_client() -> genai.Client:
                         " must be set to use Gemini models."
                     )
     return _genai_client
+
+
+def _contents_to_openai_content(contents) -> list:
+    """Converts Gemini ``types.Part``/string contents to OpenAI content parts."""
+    openai_content = []
+    for item in _iter_content_items(contents):
+        if isinstance(item, str):
+            openai_content.append({"type": "text", "text": item})
+            continue
+
+        text = getattr(item, "text", None)
+        if text:
+            openai_content.append({"type": "text", "text": text})
+            continue
+
+        inline_data = getattr(item, "inline_data", None)
+        if inline_data is not None and getattr(inline_data, "data", None):
+            mime_type = getattr(inline_data, "mime_type", None) or "image/png"
+            if mime_type == "application/pdf":
+                raise ValueError(
+                    "PDF inputs are not supported by OpenAI-compatible chat "
+                    "completions. Use call_llm_with_pdf instead."
+                )
+            data = inline_data.data
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            encoded = base64.b64encode(data).decode("utf-8")
+            openai_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
+                }
+            )
+            continue
+
+        if getattr(item, "file_data", None) is not None:
+            raise ValueError(
+                "File inputs (file_data) are not supported by OpenAI-compatible "
+                "chat completions. Use call_llm_with_pdf instead."
+            )
+
+        raise ValueError(f"Unsupported content item for OpenAI backend: {item!r}")
+
+    return openai_content
+
+
+def _iter_content_items(contents):
+    if isinstance(contents, (str, bytes)):
+        if isinstance(contents, bytes):
+            raise ValueError("Raw bytes are not supported as LLM contents.")
+        yield contents
+        return
+
+    if isinstance(contents, (list, tuple)):
+        for item in contents:
+            yield from _iter_content_items(item)
+        return
+
+    parts = getattr(contents, "parts", None)
+    if parts:
+        for part in parts:
+            yield from _iter_content_items(part)
+        return
+
+    yield contents
+
+
+def _split_generation_configs(generation_configs: dict):
+    """Splits Gemini generation configs into OpenAI-compatible ones + system prompt."""
+    configs = dict(generation_configs or {})
+    system_prompt = configs.pop("system_instruction", None)
+
+    openai_configs = {}
+    for key, value in configs.items():
+        if key == "max_output_tokens":
+            openai_configs["max_tokens"] = value
+        elif key == "stop_sequences":
+            openai_configs["stop"] = value
+        elif key in {
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "seed",
+            "response_format",
+            "logit_bias",
+            "n",
+            "max_tokens",
+            "stop",
+        }:
+            openai_configs[key] = value
+        # Gemini-specific options (tools, response_modalities, image_config,
+        # candidate_count, safety_settings, ...) are dropped here.
+
+    return openai_configs, system_prompt
+
+
+_tool_fallback_warned_roles = set()
+
+
+def _warn_tool_fallback(role: str) -> None:
+    if role in _tool_fallback_warned_roles:
+        return
+    _tool_fallback_warned_roles.add(role)
+    print(
+        f"WARNING: Role '{role}' uses an OpenAI-compatible endpoint, but this "
+        "call requires Google Search grounding. Falling back to native Gemini "
+        "for this call."
+    )
+
+
+def _call_openai_compatible_with_contents(
+    contents,
+    endpoint: "model_config.ModelEndpoint",
+    result_parsing_func,
+    generation_configs: dict,
+    check_parsed_response_not_none: bool,
+):
+    # Imported lazily to avoid pulling in the OpenAI/OpenCV stack for
+    # Gemini-only runs.
+    from utils.openai_utils import (
+        call_openai_models_with_content,
+        get_openai_client,
+    )
+
+    openai_content = _contents_to_openai_content(contents)
+    # Text-only requests are sent as a plain string for better compatibility
+    # with OpenAI-compatible relays.
+    if openai_content and all(
+        part.get("type") == "text" for part in openai_content
+    ):
+        openai_content = "\n\n".join(part["text"] for part in openai_content)
+
+    openai_configs, system_prompt = _split_generation_configs(generation_configs)
+
+    return call_openai_models_with_content(
+        content=openai_content,
+        model_name=endpoint.model_name,
+        generation_configs=openai_configs,
+        result_parsing_func=result_parsing_func,
+        check_parsed_response_not_none=check_parsed_response_not_none,
+        system_prompt=system_prompt,
+        client=get_openai_client(
+            base_url=endpoint.base_url, api_key=endpoint.api_key
+        ),
+    )
 
 
 def parse_gemini_json_results(response: str):
@@ -158,6 +328,7 @@ def parse_gemini_json_latex_response(response_text: str) -> Dict[str, Any]:
 def call_gemini_with_contents(
     contents: types.Content,
     model_name: str,
+    model_role: str = model_config.MAIN_ROLE,
     max_retries: int = 5,
     base_interval_sec: int = 5,
     result_parsing_func: callable = parse_gemini_json_results,
@@ -166,16 +337,38 @@ def call_gemini_with_contents(
 ):
     """
     Calls the Gemini API (text-only) with retry logic and exponential backoff.
+
+    If a third-party endpoint is enabled for ``model_role``, the call is routed
+    there instead. OpenAI-compatible endpoints fall back to native Gemini for
+    calls that require Gemini-only tools (e.g. Google Search grounding).
     """
 
     raw_response = None
     parsed_response = None
 
-    genai_client = get_genai_client()
+    generation_configs = generation_configs or {}
+
+    endpoint = model_config.get_endpoint(model_role)
+    if endpoint is not None:
+        if endpoint.api_style == "openai":
+            if generation_configs.get("tools"):
+                _warn_tool_fallback(model_role)
+                endpoint = None
+            else:
+                return _call_openai_compatible_with_contents(
+                    contents=contents,
+                    endpoint=endpoint,
+                    result_parsing_func=result_parsing_func,
+                    generation_configs=generation_configs,
+                    check_parsed_response_not_none=check_parsed_response_not_none,
+                )
+
+    active_model_name = endpoint.model_name if endpoint is not None else model_name
+    genai_client = get_genai_client(endpoint)
     for attempt in range(max_retries):
         try:
             response = genai_client.models.generate_content(
-                model=model_name,
+                model=active_model_name,
                 contents=contents,
                 config=types.GenerateContentConfig(**generation_configs),
             )
@@ -232,11 +425,13 @@ def call_gemini_with_text_prompt(
     check_parsed_response_not_none: bool = True,
     max_retries: int = 5,
     base_interval_sec: int = 5,
+    model_role: str = model_config.MAIN_ROLE,
 ):
     contents = [types.Part(text=prompt)]
     return call_gemini_with_contents(
         contents=contents,
         model_name=model_name,
+        model_role=model_role,
         result_parsing_func=result_parsing_func,
         generation_configs=generation_configs,
         check_parsed_response_not_none=check_parsed_response_not_none,
@@ -254,6 +449,7 @@ def call_gemini_with_images(
     check_parsed_response_not_none: bool = True,
     max_retries: int = 5,
     base_interval_sec: int = 5,
+    model_role: str = model_config.MAIN_ROLE,
 ):
     llm_contents = [
         types.Part.from_text(text=prompt),
@@ -268,6 +464,7 @@ def call_gemini_with_images(
     response_dict = call_gemini_with_contents(
         contents=llm_contents,
         model_name=model_name,
+        model_role=model_role,
         generation_configs=generation_configs,
         result_parsing_func=result_parsing_func,
         check_parsed_response_not_none=check_parsed_response_not_none,
@@ -288,11 +485,31 @@ def generate_image_with_gemini(
 ) -> str:
     """
     Directly calls Gemini for image generation and returns base64.
+
+    If the ``image`` role has a third-party endpoint enabled in
+    ``model_config.yaml``, the call is routed there instead.
     """
     if generation_configs is None:
         generation_configs = {}
 
-    genai_client = get_genai_client()
+    endpoint = model_config.get_endpoint(model_config.IMAGE_ROLE)
+    if endpoint is not None and endpoint.api_style == "openai":
+        from utils.openai_utils import generate_image_with_openai_compatible
+
+        return generate_image_with_openai_compatible(
+            model_name=endpoint.model_name,
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            generation_configs=generation_configs,
+            base_url=endpoint.base_url,
+            api_key=endpoint.api_key,
+            max_retries=max_retries,
+            base_interval_sec=base_interval_sec,
+            save_path=save_path,
+        )
+
+    active_model_name = endpoint.model_name if endpoint is not None else model_name
+    genai_client = get_genai_client(endpoint)
     for attempt in range(max_retries):
         try:
             config_args = {
@@ -306,7 +523,7 @@ def generate_image_with_gemini(
             config_args.update(generation_configs)
 
             response = genai_client.models.generate_content(
-                model=model_name,
+                model=active_model_name,
                 contents=[types.Part.from_text(text=prompt)],
                 config=types.GenerateContentConfig(**config_args),
             )

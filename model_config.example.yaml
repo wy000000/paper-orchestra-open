@@ -1,0 +1,76 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Optional third-party model endpoints for PaperOrchestra.
+#
+# Usage:
+#   1. Copy this file to `model_config.yaml` in the project root.
+#   2. Fill in the endpoints you want to use and set `enabled: true`.
+#   3. `model_config.yaml` is gitignored, so real API keys do not get committed.
+#
+# Roles:
+#   main  - writer / reflection / plotting LLMs.
+#   light - candidate paper discovery + citation-title extraction.
+#   image - image generation model used by the plotting agent.
+#
+# A disabled role (or an absent file) keeps the original Gemini/OpenAI
+# behaviour configured through `.env` and the CLI flags.
+#
+# `api_key` supports `${ENV_VAR}` references. When it is empty, the loader
+# falls back to MAIN_API_KEY / LIGHT_API_KEY / IMAGE_API_KEY.
+#
+# `api_style` is optional and defaults to `openai`:
+#   - openai: OpenAI-compatible Chat Completions / Images API (most relays).
+#   - gemini: Gemini-compatible endpoint (base_url should include the API
+#     version, e.g. `https://your-relay.example.com/v1beta`). Google Search
+#     grounding keeps working when the relay supports it.
+
+main:
+  enabled: false
+  base_url: "https://api.example.com/v1"
+  model_name: "gpt-5"
+  api_key: "${MAIN_API_KEY}"
+  api_style: "openai"
+
+# NOTE (light role):
+#   `light` is only used by:
+#     1. candidate paper discovery in the literature agent
+#        (methods/agents/literature_review_agent.py) - this call needs the
+#        Google Search tool;
+#     2. citation-title extraction in autoraters/citation_f1.py.
+#   Google Search grounding is Gemini-only. With `api_style: openai`, the
+#   discovery call automatically falls back to native Gemini and prints one
+#   warning, so GEMINI_API_KEY / Vertex AI credentials are still required.
+#   The configured `light` endpoint is then only used for citation-title
+#   extraction; the main generation pipeline does not use it. Use
+#   `api_style: gemini` if the relay supports grounding.
+light:
+  enabled: false
+  base_url: "https://api.example.com/v1"
+  model_name: "gpt-5-mini"
+  api_key: "${LIGHT_API_KEY}"
+  api_style: "openai"
+
+image:
+  enabled: false
+  base_url: "https://api.example.com/v1"
+  model_name: "gpt-image-1"
+  api_key: "${IMAGE_API_KEY}"
+  api_style: "openai"
+
+# Optional Semantic Scholar API key.
+# Anonymous access works but is heavily rate-limited; a free key raises the
+# limit. The YAML value takes precedence over SEMANTIC_SCHOLAR_API_KEY in .env.
+semantic_scholar:
+  api_key: "${SEMANTIC_SCHOLAR_API_KEY}"

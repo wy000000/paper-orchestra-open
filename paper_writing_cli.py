@@ -18,6 +18,8 @@ import os
 import shutil
 from datetime import datetime
 
+from utils import model_config
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -88,6 +90,12 @@ def main():
     )
 
     args = parser.parse_args()
+
+    try:
+        model_config.print_active_endpoints()
+    except Exception as config_error:
+        print(f"Error: invalid model_config.yaml: {config_error}")
+        sys.exit(1)
 
     if args.research_cutoff is None:
         args.research_cutoff = datetime.now().strftime("%Y-%m")

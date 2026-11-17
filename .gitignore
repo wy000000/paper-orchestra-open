@@ -1,6 +1,7 @@
 *.pyc
 *.out
 .env
+model_config.yaml
 *.log
 datasets/*
 paper_output*
