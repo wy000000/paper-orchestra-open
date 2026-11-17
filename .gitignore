@@ -8,3 +8,4 @@ paper_output*
 *.zip
 *.exe
 doc/
+runs/
