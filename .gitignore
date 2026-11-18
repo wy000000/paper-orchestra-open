@@ -8,8 +8,6 @@ model_config.yaml
 datasets/*
 paper_output*
 *.zip
-*.exe
-doc/
+tools/
 runs/
-TinyTeX/
-pandoc/
+doc/
