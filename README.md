@@ -1,25 +1,33 @@
-# <div align="center">🎻 PaperOrchestra: A Multi-Agent Framework for Automated AI Research Paper Writing</div>
+# <div align="center">🎻 PaperOrchestra Open: A Multi-Agent Framework for Automated AI Research Paper Writing</div>
+<div align="center">Unofficial fork of <a href="https://github.com/google-research/paper-orchestra">PaperOrchestra</a> by Google Cloud AI Research</div>
 <div align="center">Yiwen Song<sup>1</sup>, Yale Song<sup>1</sup>, Tomas Pfister<sup>1</sup>, and Jinsung Yoon<sup>1</sup></div>
 <div align="center"><sup>1</sup>Google Cloud AI Research</div>
 <br><br>
 
-PaperOrchestra is a multi-agent framework for automated AI research paper writing. It flexibly transforms unconstrained pre-writing materials (ideas and experimental logs) into submission-ready LaTeX manuscripts, including comprehensive literature synthesis and generated visuals, such as plots and conceptual diagrams.
+**PaperOrchestra Open** (repo: `paper-orchestra-open`, also written *PaperOrchestraOpen*) is an unofficial, configuration-focused fork of [PaperOrchestra](https://github.com/google-research/paper-orchestra) (*paper-orchestra*) by Google Cloud AI Research. It keeps the original multi-agent framework for automated AI research paper writing — turning ideas and experimental logs into submission-ready LaTeX manuscripts with literature synthesis and generated visuals — and adds pluggable model endpoints plus direct academic-database literature discovery, so it can run with any OpenAI-compatible model and on networks where Google is not directly reachable.
 
 Acting like an orchestrated team of specialized agents, it handles outline generation, literature review, section writing, content refinement, and plotting to close the gap between raw research materials and submission ready papers.
 
 <div align="center">
-  <img src="assets/overview.png" alt="PaperOrchestra Overview" width="90%"/>
+  <img src="assets/overview.png" alt="PaperOrchestra Open Overview" width="90%"/>
 </div>
+
+## Why PaperOrchestra Open
+
+- **No Google dependency for literature discovery.** OpenAlex, Crossref, arXiv, DBLP, Semantic Scholar and PubMed are queried directly; the `light` model only plans keyword queries and ranks the returned records. No Google Search grounding, no proxy needed for the scholarly APIs.
+- **Any model endpoint.** The `main`, `light` and `image` roles can point at any OpenAI-compatible or Gemini-compatible API (including self-hosted relays), configured through `model_config.yaml`.
+- **Upstream compatible.** The pipeline, prompts and LaTeX templates are unchanged. With no config file, or with every role disabled, behaviour is identical to the original repository.
+- **Sensible defaults.** Free, key-less academic sources by default; Semantic Scholar and NCBI keys are optional and only raise rate limits.
 
 ## Project Origin
 
-This repository is a modified version of [PaperOrchestra](https://github.com/google-research/paper-orchestra) by Google Cloud AI Research, the codebase behind the paper *PaperOrchestra: A Multi-Agent Framework for Automated AI Research Paper Writing* (arXiv:2604.05018). Credit for the original design, agents, prompts, and templates belongs to the original authors; see [Citation](#citation).
+**PaperOrchestra Open** is an unofficial fork of [PaperOrchestra](https://github.com/google-research/paper-orchestra), the codebase behind the paper *PaperOrchestra: A Multi-Agent Framework for Automated AI Research Paper Writing* (arXiv:2604.05018). Credit for the original design, agents, prompts, and templates belongs to the original authors; see [Citation](#citation). This fork is not affiliated with, sponsored by, or endorsed by Google.
 
 A summary of the modifications made in this fork is provided in [Changes from the Original](#changes-from-the-original).
 
 ## Changes from the Original
 
-This fork keeps the original multi-agent pipeline, prompts, and LaTeX templates intact. The changes are limited to infrastructure and configuration:
+PaperOrchestra Open keeps the original multi-agent pipeline, prompts, and LaTeX templates intact. The changes are limited to infrastructure and configuration:
 
 | Area | Change |
 |------|--------|
@@ -71,7 +79,7 @@ When no config file is present, or all roles are disabled, behaviour is identica
     SMTP_PASSWORD=your_password
     ```
 
-3.  **Optional: Third-party Model Endpoints and API Settings**: PaperOrchestra can route its three logical model roles to third-party or self-hosted APIs. Copy the template and edit it:
+3.  **Optional: Third-party Model Endpoints and API Settings**: PaperOrchestra Open can route its three logical model roles to third-party or self-hosted APIs. Copy the template and edit it:
     ```bash
     cp model_config.example.yaml model_config.yaml
     ```
@@ -213,6 +221,6 @@ If you find this repo or our paper helpful, please cite it as follows:
 }
 ```
 
-# Disclaimer
+## Disclaimer
 
-This is not an officially supported Google product.
+PaperOrchestra Open is an unofficial fork and is **not** an officially supported Google product. It is not affiliated with, sponsored by, or endorsed by Google. "PaperOrchestra" refers to the original project by Google Cloud AI Research; see [Project Origin](#project-origin).

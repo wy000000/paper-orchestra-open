@@ -14,7 +14,7 @@
 
 """Optional third-party model endpoint configuration.
 
-PaperOrchestra uses three logical model roles:
+PaperOrchestra Open uses three logical model roles:
 
 * ``main``  - the writer/reflection/plotting LLMs.
 * ``light`` - lightweight tasks currently backed by ``gemini-3-flash-preview``.

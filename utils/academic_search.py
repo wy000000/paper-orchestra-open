@@ -51,7 +51,7 @@ VALID_SOURCES = (
     "pubmed",
 )
 
-USER_AGENT = "PaperOrchestra/1.0 (literature discovery; academic APIs)"
+USER_AGENT = "PaperOrchestraOpen/1.0 (literature discovery; academic APIs)"
 
 # Minimum seconds between two requests to the same API.  These are
 # deliberately conservative: the agent runs many search tasks concurrently.

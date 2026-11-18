@@ -23,7 +23,7 @@ from utils import model_config
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CLI for generating a single paper from the Paper Orchestra pipeline."
+        description="CLI for generating a single paper from the PaperOrchestra Open pipeline."
     )
 
     parser.add_argument(

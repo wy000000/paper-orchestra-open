@@ -1,3 +1,5 @@
+*.mimo
+*.ruff
 *.pyc
 *.out
 .env
@@ -10,3 +12,4 @@ paper_output*
 doc/
 runs/
 TinyTeX/
+pandoc/

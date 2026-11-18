@@ -1,13 +1,13 @@
-# Paper Orchestra Frontend
+# PaperOrchestra Open Frontend
 
-This directory contains the Streamlit frontend for Paper Orchestra.
+This directory contains the Streamlit frontend for PaperOrchestra Open.
 
 ## How to Launch the Demo Locally
 
 1. Ensure you have activated your environment and installed dependencies.
 2. Navigate to the project root directory:
    ```bash
-   cd paper-orchestra
+   cd paper-orchestra-open
    conda activate paper_orchestra
    ```
 3. Run the Streamlit application:

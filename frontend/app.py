@@ -43,7 +43,7 @@ from methods.paper_writer import write_single_paper
 from utils.pdf_utils import pdf_to_grid_images
 
 st.set_page_config(
-    page_title="Paper Orchestra - AI Paper Writer",
+    page_title="PaperOrchestra Open - AI Paper Writer",
     page_icon="🎻",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -550,7 +550,7 @@ def handle_live_execution(
 # MAIN PAGE ROUTING
 # ------------------------------------------------------------------------
 
-st.title("🎻 Paper Orchestra Demo")
+st.title("🎻 PaperOrchestra Open Demo")
 st.markdown(
     "Demonstrating the automated paper writing process as detailed in [PaperOrchestra](https://arxiv.org/abs/2604.05018)."
 )
