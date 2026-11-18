@@ -24,12 +24,16 @@ Each role can be pointed at a third-party (or self-hosted) endpoint through
 ``model_config.yaml``.  When a role is disabled, missing, or the config file is
 absent, the original Gemini/OpenAI behaviour configured through ``.env`` and the
 CLI flags is preserved.
+
+A non-role ``literature_discovery`` section selects the academic databases
+used when the ``light`` role is enabled; otherwise Gemini + Google Search is
+used for discovery.
 """
 
 import os
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Dict, Optional
 
 try:
@@ -55,8 +59,22 @@ IMAGE_ROLE = "image"
 VALID_ROLES = (MAIN_ROLE, LIGHT_ROLE, IMAGE_ROLE)
 VALID_API_STYLES = ("openai", "gemini")
 
+SEMANTIC_SCHOLAR_SECTION = "semantic_scholar"
+LITERATURE_DISCOVERY_SECTION = "literature_discovery"
+
 # Top-level YAML sections that are not model roles.
-NON_ROLE_SECTIONS = {"semantic_scholar"}
+NON_ROLE_SECTIONS = {SEMANTIC_SCHOLAR_SECTION, LITERATURE_DISCOVERY_SECTION}
+
+DEFAULT_DISCOVERY_SOURCES = ("openalex", "crossref", "arxiv", "dblp")
+VALID_DISCOVERY_SOURCES = (
+    "openalex",
+    "crossref",
+    "arxiv",
+    "dblp",
+    "semantic_scholar",
+    "pubmed",
+)
+
 
 DEFAULT_CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -96,6 +114,37 @@ class ModelEndpoint:
     @property
     def masked_api_key(self) -> str:
         return _mask_secret(self.api_key)
+
+
+@dataclass(frozen=True)
+class SourceOptions:
+    """Dedicated settings for one literature-discovery database."""
+
+    max_results: Optional[int] = None
+    timeout: Optional[float] = None
+    min_interval: Optional[float] = None
+    mailto: str = ""
+    email: str = ""
+    tool: str = ""
+    api_key: str = ""
+
+
+@dataclass(frozen=True)
+class LiteratureDiscoveryConfig:
+    """How the literature agent discovers candidate papers.
+
+    Academic discovery is active whenever the ``light`` role is enabled: that
+    role is only used for tool-free query planning and ranking, so any
+    OpenAI-compatible endpoint is enough.  This section only selects and tunes
+    the databases that are queried.
+    """
+
+    sources: tuple = DEFAULT_DISCOVERY_SOURCES
+    timeout: float = 20.0
+    max_results_per_source: int = 10
+    max_candidates: int = 40
+    max_queries: int = 3
+    source_options: Dict[str, SourceOptions] = field(default_factory=dict)
 
 
 _config_lock = threading.Lock()
@@ -271,12 +320,26 @@ def get_semantic_scholar_api_key() -> str:
     """Returns the Semantic Scholar API key from YAML or the environment.
 
     The key is optional: anonymous requests work but share a heavily
-    rate-limited pool. YAML takes precedence; ``SEMANTIC_SCHOLAR_API_KEY`` in
-    ``.env``/the environment remains supported as a fallback.
+    rate-limited pool. Precedence is the nested per-source section
+    (``literature_discovery.semantic_scholar.api_key``), then the top-level
+    ``semantic_scholar.api_key`` used by the enrichment path, then
+    ``SEMANTIC_SCHOLAR_API_KEY`` from ``.env``/the environment.
     """
     raw_config = _load_raw_config()
-    section = raw_config.get("semantic_scholar")
 
+    discovery = raw_config.get(LITERATURE_DISCOVERY_SECTION)
+    if isinstance(discovery, dict):
+        nested = discovery.get("semantic_scholar")
+        if isinstance(nested, dict):
+            nested_key = _expand_env_refs(
+                nested.get("api_key", "") or "",
+                "literature_discovery.semantic_scholar.api_key",
+                required=False,
+            )
+            if nested_key:
+                return nested_key
+
+    section = raw_config.get(SEMANTIC_SCHOLAR_SECTION)
     if section is None:
         return os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
 
@@ -292,6 +355,197 @@ def get_semantic_scholar_api_key() -> str:
         required=False,
     )
     return api_key or os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+
+
+def _parse_discovery_sources(value) -> tuple:
+    if value is None:
+        return DEFAULT_DISCOVERY_SOURCES
+    if isinstance(value, str):
+        candidates = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, (list, tuple)):
+        candidates = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raise ValueError(
+            "model_config.yaml: 'literature_discovery.sources' must be a list "
+            "of database names or a comma-separated string."
+        )
+
+    sources = []
+    for source in candidates:
+        source = source.lower()
+        if source not in VALID_DISCOVERY_SOURCES:
+            raise ValueError(
+                f"model_config.yaml: 'literature_discovery.sources' contains "
+                f"unsupported source '{source}'. Use one of: "
+                f"{', '.join(VALID_DISCOVERY_SOURCES)}."
+            )
+        if source not in sources:
+            sources.append(source)
+
+    return tuple(sources) or DEFAULT_DISCOVERY_SOURCES
+
+
+def _positive_int(value, field_name: str, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"model_config.yaml: 'literature_discovery.{field_name}' must be "
+            "an integer."
+        )
+    return parsed if parsed > 0 else default
+
+
+def _optional_positive_int(value, field_name: str) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"model_config.yaml: '{field_name}' must be an integer."
+        )
+    if parsed <= 0:
+        raise ValueError(
+            f"model_config.yaml: '{field_name}' must be greater than 0."
+        )
+    return parsed
+
+
+def _optional_positive_float(value, field_name: str) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"model_config.yaml: '{field_name}' must be a number."
+        )
+    if parsed <= 0:
+        raise ValueError(
+            f"model_config.yaml: '{field_name}' must be greater than 0."
+        )
+    return parsed
+
+
+def _parse_source_options(source: str, raw_options) -> SourceOptions:
+    if raw_options is None:
+        return SourceOptions()
+    if not isinstance(raw_options, dict):
+        raise ValueError(
+            f"model_config.yaml: 'literature_discovery.{source}' must be a "
+            "mapping of source-specific settings."
+        )
+
+    prefix = f"literature_discovery.{source}"
+    return SourceOptions(
+        max_results=_optional_positive_int(
+            raw_options.get("max_results"), f"{prefix}.max_results"
+        ),
+        timeout=_optional_positive_float(
+            raw_options.get("timeout"), f"{prefix}.timeout"
+        ),
+        min_interval=_optional_positive_float(
+            raw_options.get("min_interval"), f"{prefix}.min_interval"
+        ),
+        mailto=_expand_env_refs(
+            raw_options.get("mailto", "") or "",
+            f"{prefix}.mailto",
+            required=False,
+        ),
+        email=_expand_env_refs(
+            raw_options.get("email", "") or "",
+            f"{prefix}.email",
+            required=False,
+        ),
+        tool=str(raw_options.get("tool") or "").strip(),
+        api_key=_expand_env_refs(
+            raw_options.get("api_key", "") or "",
+            f"{prefix}.api_key",
+            required=False,
+        ),
+    )
+
+
+def _source_env_fallbacks(source: str, options: SourceOptions) -> SourceOptions:
+    """Fills optional identity fields from the per-source environment vars."""
+    updates = {}
+    if source == "openalex" and not options.mailto:
+        updates["mailto"] = os.environ.get("OPENALEX_MAILTO", "")
+    elif source == "crossref" and not options.mailto:
+        updates["mailto"] = os.environ.get("CROSSREF_MAILTO", "")
+    elif source == "semantic_scholar" and not options.api_key:
+        updates["api_key"] = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+    elif source == "pubmed":
+        if not options.email:
+            updates["email"] = os.environ.get("PUBMED_EMAIL", "")
+        if not options.api_key:
+            updates["api_key"] = os.environ.get(
+                "NCBI_API_KEY", ""
+            ) or os.environ.get("PUBMED_API_KEY", "")
+        if not options.tool:
+            updates["tool"] = "paper_orchestra"
+
+    return replace(options, **updates) if updates else options
+
+
+def get_literature_discovery_config() -> LiteratureDiscoveryConfig:
+    """Returns the literature-discovery settings from ``model_config.yaml``.
+
+    The section is optional and only selects/tunes databases.  Whether
+    academic discovery is used at all is decided by the ``light`` role: an
+    enabled third-party ``light`` endpoint means no Gemini + Google Search is
+    available, so discovery goes through these APIs instead.
+    """
+    raw_config = _load_raw_config()
+    section = raw_config.get(LITERATURE_DISCOVERY_SECTION)
+
+    if section is None:
+        return LiteratureDiscoveryConfig()
+
+    if not isinstance(section, dict):
+        raise ValueError(
+            "model_config.yaml: 'literature_discovery' must be a mapping with "
+            "'sources', optional tuning fields and per-source sections."
+        )
+
+    sources = _parse_discovery_sources(section.get("sources"))
+    source_options = {}
+    for source in VALID_DISCOVERY_SOURCES:
+        options = _parse_source_options(source, section.get(source))
+        if source == "semantic_scholar" and not options.api_key:
+            # The S2 key is shared with the enrichment path; keep accepting
+            # the legacy top-level `semantic_scholar` section as well.
+            options = replace(options, api_key=get_semantic_scholar_api_key())
+        source_options[source] = _source_env_fallbacks(source, options)
+
+    timeout_value = section.get("timeout", 20.0)
+    try:
+        timeout = float(timeout_value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "model_config.yaml: 'literature_discovery.timeout' must be a number "
+            "of seconds."
+        )
+    if timeout <= 0:
+        timeout = 20.0
+
+    return LiteratureDiscoveryConfig(
+        sources=sources,
+        timeout=timeout,
+        max_results_per_source=_positive_int(
+            section.get("max_results_per_source"),
+            "max_results_per_source",
+            10,
+        ),
+        max_candidates=_positive_int(
+            section.get("max_candidates"), "max_candidates", 40
+        ),
+        max_queries=_positive_int(section.get("max_queries"), "max_queries", 3),
+        source_options=source_options,
+    )
 
 
 def reload_model_config() -> Dict[str, Optional[ModelEndpoint]]:
@@ -353,3 +607,13 @@ def print_active_endpoints() -> None:
             "Semantic Scholar API key: not set "
             "(anonymous access, stricter rate limits)."
         )
+
+    discovery = get_literature_discovery_config()
+    if uses_third_party(LIGHT_ROLE):
+        print(
+            "Literature discovery: academic APIs "
+            f"({', '.join(discovery.sources)})"
+        )
+    else:
+        print("Literature discovery: Google Search grounding (Gemini).")
+

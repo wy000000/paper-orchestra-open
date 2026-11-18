@@ -117,7 +117,7 @@ class SectionWritingAgent:
             if len(authors_list) > 3:
                 authors += " et al."
             year = data.get("year", "N/A")
-            abstract = data.get("abstract", "No abstract available.")
+            abstract = data.get("abstract") or "No abstract available."
 
             context += f"--- Key: {key} ---\n"
             context += f"Title: {title}\n"

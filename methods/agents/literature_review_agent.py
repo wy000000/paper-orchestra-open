@@ -27,6 +27,7 @@ from methods.prompts.literature_review_agent import (
 )
 from utils.gemini_utils import call_gemini_with_contents, parse_gemini_latex_results
 from utils.scholar_utils import s2_title_search
+from utils.academic_search import AcademicPaper, search_academic_databases
 from utils import model_config
 
 
@@ -39,6 +40,15 @@ class CandidatePaper(BaseModel):
 class DiscoveryResult(BaseModel):
     section_name: str
     candidates: List[CandidatePaper]
+
+
+class RankedCandidate(BaseModel):
+    id: int
+    reason: str = ""
+
+
+class CandidateRanking(BaseModel):
+    candidates: List[RankedCandidate]
 
 
 class PaperData(BaseModel):
@@ -86,9 +96,12 @@ class HybridLiteratureAgent:
         }
         self.context_files = self._load_context_files()
         self.google_search_tool = types.Tool(google_search=types.GoogleSearch())
+        self.discovery_config = model_config.get_literature_discovery_config()
 
         self.registry_lock = threading.Lock()
         self.print_lock = threading.Lock()
+        self._discovery_error_lock = threading.Lock()
+        self._failed_discovery_sources = set()
 
     def _safe_print(self, message: str):
         """Thread-safe printing to prevent garbled output."""
@@ -173,6 +186,12 @@ class HybridLiteratureAgent:
         if not active_tasks:
             return
 
+        if model_config.uses_third_party(model_config.LIGHT_ROLE):
+            self._execute_academic_discovery(
+                active_tasks, outline, registry, cutoff_date
+            )
+            return
+
         self._safe_print(f"   🔎 Phase 1a: Google Candidates Discovery (MaxPool=10)...")
         all_candidates_with_tasks = []
 
@@ -209,7 +228,339 @@ class HybridLiteratureAgent:
                 item["cand"], item["task"], registry, cutoff_date
             )
 
+    # --- Academic-database discovery (no Google Search grounding) ---
+
+    def _execute_academic_discovery(
+        self, tasks, outline, registry, cutoff_date
+    ):
+        """Phase 1 replacement that queries scholarly APIs directly."""
+        config = self.discovery_config
+        self._safe_print(
+            "   🔬 Phase 1a: Academic API Discovery "
+            f"(sources: {', '.join(config.sources)})..."
+        )
+
+        max_workers = min(max(1, self.max_workers), 8, len(tasks))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_task = {
+                executor.submit(
+                    self._discover_from_academic_apis, task, outline, cutoff_date
+                ): task
+                for task in tasks
+            }
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    records = future.result()
+                except Exception as exc:
+                    self._safe_print(
+                        f"      ❌ Academic discovery failed for "
+                        f"'{task['focus'][:30]}...': {exc}"
+                    )
+                    continue
+
+                for record in records:
+                    self._register_academic_paper(
+                        record, task["section"], registry, cutoff_date
+                    )
+
+    def _discover_from_academic_apis(self, task, outline, cutoff_date) -> List[Dict]:
+        """Plans queries, searches the configured databases, and ranks hits."""
+        focus = (task.get("focus") or "").strip()
+        if not focus:
+            return []
+
+        self._safe_print(
+            f"   🔎 Academic Search [{task['section']}]: '{focus[:70]}'"
+        )
+
+        config = self.discovery_config
+        queries = self._plan_academic_queries(task, outline, cutoff_date)
+
+        merged: Dict[str, AcademicPaper] = {}
+        for query in queries:
+            papers = search_academic_databases(
+                query=query,
+                sources=config.sources,
+                limit_per_source=config.max_results_per_source,
+                cutoff_date=cutoff_date,
+                timeout=config.timeout,
+                source_options=config.source_options,
+                on_error=self._on_academic_search_error,
+            )
+            for paper in papers:
+                key = self._normalize_title(paper.title)
+                if not key:
+                    continue
+                if key in merged:
+                    merged[key].merge(paper)
+                else:
+                    merged[key] = paper
+
+        if not merged:
+            self._safe_print(f"      ⚠️ No API results for '{focus[:50]}'")
+            return []
+
+        candidates = sorted(
+            merged.values(),
+            key=lambda paper: (paper.citation_count, paper.year or 0),
+            reverse=True,
+        )[: config.max_candidates]
+
+        selected = self._rank_academic_candidates(task, candidates, cutoff_date)
+        return [paper.as_dict() for paper in selected]
+
+    def _plan_academic_queries(self, task, outline, cutoff_date) -> List[str]:
+        """Asks the light model for a few tool-free, API-friendly queries."""
+        config = self.discovery_config
+        focus = (task.get("focus") or "").strip()
+        core_problem = (
+            outline.get("intro_related_work_plan", {})
+            .get("introduction_strategy", {})
+            .get("problem_gap_hypothesis", "N/A")
+        )
+
+        prompt = f"""
+        You are planning keyword queries for academic literature databases (OpenAlex, Crossref, arXiv, DBLP).
+        These APIs match titles, abstracts and keywords, so do NOT use boolean operators or quotation marks.
+
+        SEARCH TASK: {focus}
+        CONTEXT: {task.get('context', '')}
+        BROADER PROJECT PROBLEM: {core_problem}
+        CUTOFF DATE: papers published before {cutoff_date}
+
+        Write up to {config.max_queries} short English queries (3-8 words each) covering
+        different angles of the task. Prefer technical terms that appear in paper titles.
+
+        Return JSON only, following this schema:
+        {{"queries": ["query one", "query two"]}}
+        """
+
+        queries: List[str] = []
+        try:
+            response = call_gemini_with_contents(
+                model_name="gemini-3-flash-preview",
+                model_role=model_config.LIGHT_ROLE,
+                contents=[prompt],
+                generation_configs={"temperature": 0.2},
+                check_parsed_response_not_none=False,
+            )
+            parsed = response.get("parsed_response") or {}
+            raw_queries = parsed.get("queries", []) if isinstance(parsed, dict) else []
+            for raw_query in raw_queries:
+                if isinstance(raw_query, dict):
+                    raw_query = raw_query.get("query", "")
+                query = str(raw_query).strip()
+                if query and query not in queries:
+                    queries.append(query)
+        except Exception as exc:
+            self._safe_print(
+                f"      ⚠️ Query planning failed, using the task text: {exc}"
+            )
+
+        if not queries:
+            queries = [focus]
+
+        return queries[: config.max_queries]
+
+    def _rank_academic_candidates(
+        self, task, candidates: List[AcademicPaper], cutoff_date
+    ) -> List[AcademicPaper]:
+        """Lets the light model pick the relevant subset of real API records."""
+        if not candidates:
+            return []
+
+        is_targeted = task.get("search_type") == "targeted"
+        limit = 1 if is_targeted else 15
+
+        if len(candidates) == 1:
+            candidates[0].reason = f"Only database match for: {task['focus']}"
+            return candidates
+
+        payload = []
+        for index, paper in enumerate(candidates):
+            authors = ", ".join(paper.authors[:3])
+            if len(paper.authors) > 3:
+                authors += " et al."
+            payload.append(
+                {
+                    "id": index,
+                    "title": paper.title,
+                    "year": paper.year,
+                    "venue": paper.venue,
+                    "citations": paper.citation_count,
+                    "authors": authors,
+                    "abstract": (paper.abstract or "")[:300],
+                }
+            )
+
+        instruction = (
+            "Return EXACTLY 1 candidate: the primary paper that introduced or "
+            "defined the requested method, dataset, or baseline."
+            if is_targeted
+            else "Select the 10-15 most relevant and influential papers. "
+            "Do not force results; drop unrelated papers."
+        )
+
+        prompt = f"""
+        Below are real bibliographic records returned by academic databases for this task.
+        Select the papers that best match the task. Do not invent papers and do not
+        include records that are only loosely related.
+
+        SEARCH TASK: {task.get('focus', '')}
+        CONTEXT: {task.get('context', '')}
+        CUTOFF DATE: {cutoff_date}
+        INSTRUCTION: {instruction}
+
+        RECORDS:
+        {json.dumps(payload, ensure_ascii=False)}
+
+        Return JSON only, following this schema:
+        {CandidateRanking.model_json_schema()}
+        """
+
+        try:
+            response = call_gemini_with_contents(
+                model_name="gemini-3-flash-preview",
+                model_role=model_config.LIGHT_ROLE,
+                contents=[prompt],
+                generation_configs={"temperature": 0.1},
+                check_parsed_response_not_none=False,
+            )
+            parsed = response.get("parsed_response") or {}
+            raw_candidates = (
+                parsed.get("candidates", []) if isinstance(parsed, dict) else []
+            )
+
+            selected: List[AcademicPaper] = []
+            seen_ids = set()
+            for item in raw_candidates:
+                if isinstance(item, int):
+                    item = {"id": item, "reason": ""}
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    paper_id = int(item.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                if paper_id in seen_ids or not 0 <= paper_id < len(candidates):
+                    continue
+                seen_ids.add(paper_id)
+                reason = str(item.get("reason") or "").strip()
+                candidates[paper_id].reason = reason or (
+                    f"Relevant to {task['section']}."
+                )
+                selected.append(candidates[paper_id])
+
+            if selected:
+                return selected[:limit]
+        except Exception as exc:
+            self._safe_print(
+                f"      ⚠️ Candidate ranking failed, keeping database order: {exc}"
+            )
+
+        fallback_pool = candidates
+        if is_targeted:
+            # Prefer the database's own relevance order for a single-paper match.
+            fallback_pool = sorted(
+                candidates,
+                key=lambda paper: (paper.best_rank, -paper.citation_count),
+            )
+        fallback = fallback_pool[: min(limit, len(fallback_pool))]
+        for paper in fallback:
+            paper.reason = paper.reason or (
+                f"Top database match for {task.get('section', 'this section')}."
+            )
+        return fallback
+
+    def _on_academic_search_error(self, source: str, message: str) -> None:
+        with self._discovery_error_lock:
+            if source in self._failed_discovery_sources:
+                return
+            self._failed_discovery_sources.add(source)
+        self._safe_print(f"      ⚠️ {message}")
+
+    def _register_academic_paper(self, record, section, registry, cutoff_date):
+        """Registers an API record, using S2 only when the abstract is missing."""
+        title = (record.get("title") or "").strip()
+        if not title:
+            return
+
+        norm_title = self._normalize_title(title)
+        with self.registry_lock:
+            if norm_title in registry:
+                return
+
+        if not self._is_paper_allowed(
+            {
+                "publicationDate": record.get("publication_date"),
+                "year": record.get("year"),
+            },
+            cutoff_date,
+        ):
+            return
+
+        abstract = (record.get("abstract") or "").strip()
+        if not abstract:
+            # DBLP/Crossref sometimes omit abstracts. Try Semantic Scholar as a
+            # best-effort fill, but keep the record even if that fails: the
+            # bibliographic data from the academic API is still valid.
+            import time
+
+            time.sleep(1.0)
+            s2_data = s2_title_search(
+                title,
+                int(record.get("year") or 0) or None,
+                cutoff_date,
+            )
+            if s2_data and s2_data.get("abstract"):
+                record = dict(record)
+                record["abstract"] = s2_data["abstract"]
+                record["citation_count"] = max(
+                    int(record.get("citation_count") or 0),
+                    int(s2_data.get("citationCount") or 0),
+                )
+                if not record.get("venue"):
+                    record["venue"] = s2_data.get("venue") or ""
+                if not record.get("journal"):
+                    record["journal"] = (s2_data.get("journal") or {}).get("name")
+                abstract = record["abstract"].strip()
+
+        if len(abstract) > 1500:
+            abstract = abstract[:1500] + "... [Truncated]"
+
+        sources = record.get("sources") or []
+        venue = record.get("venue") or ("arXiv" if "arxiv" in sources else "Unknown")
+
+        full_obj = PaperData(
+            citation_key=self._generate_key(
+                [{"name": author} for author in record.get("authors") or []],
+                record.get("year"),
+                title,
+            ),
+            title=title,
+            authors=list(record.get("authors") or []),
+            venue=venue,
+            year=int(record.get("year") or 0),
+            abstract=abstract,
+            citation_count=int(record.get("citation_count") or 0),
+            found_in_section=section,
+            reason=record.get("reason") or "",
+            journal=record.get("journal"),
+            volume=record.get("volume"),
+            pages=record.get("pages"),
+            publication_date=record.get("publication_date"),
+        )
+
+        with self.registry_lock:
+            if norm_title not in registry:
+                registry[norm_title] = full_obj
+                self._safe_print(
+                    f"      -> 📚 Added API paper: {full_obj.title}"
+                )
+
     def _collect_search_tasks(self, outline: Dict) -> List[Dict]:
+
         tasks = []
         plan = outline.get("intro_related_work_plan", {})
 
@@ -580,7 +931,6 @@ class HybridLiteratureAgent:
                 "abstract": p.abstract.strip(),
             }
             for p in papers
-            if p.abstract
         }
 
     def _save_outputs(self, latex, bibtex, citation_map, outline, outline_path):

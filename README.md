@@ -11,6 +11,31 @@ Acting like an orchestrated team of specialized agents, it handles outline gener
   <img src="assets/overview.png" alt="PaperOrchestra Overview" width="90%"/>
 </div>
 
+## Project Origin
+
+This repository is a modified version of [PaperOrchestra](https://github.com/google-research/paper-orchestra) by Google Cloud AI Research, the codebase behind the paper *PaperOrchestra: A Multi-Agent Framework for Automated AI Research Paper Writing* (arXiv:2604.05018). Credit for the original design, agents, prompts, and templates belongs to the original authors; see [Citation](#citation).
+
+A summary of the modifications made in this fork is provided in [Changes from the Original](#changes-from-the-original).
+
+## Changes from the Original
+
+This fork keeps the original multi-agent pipeline, prompts, and LaTeX templates intact. The changes are limited to infrastructure and configuration:
+
+| Area | Change |
+|------|--------|
+| Third-party model endpoints | Added an optional `model_config.yaml` mechanism (new `utils/model_config.py` and `model_config.example.yaml`) that routes the `main`, `light`, and `image` model roles to third-party or self-hosted APIs. Supports `openai` and `gemini` API styles, `${ENV_VAR}` references in API keys, and the `PAPER_ORCHESTRA_CONFIG` environment variable for a config file outside the project root. |
+| LLM call routing | Updated `utils/gemini_utils.py`, `utils/llm_backend_utils.py`, and `utils/openai_utils.py` so calls are dispatched through the configured endpoint. Calls that require Google Search grounding automatically fall back to native Gemini (with a warning) when the `light` role uses an OpenAI-compatible endpoint. |
+| Lightweight role wiring | The `light` role now powers candidate paper discovery in `methods/agents/literature_review_agent.py` and citation-title extraction in `utils/content_parsing_utils.py`. |
+| Academic-database discovery | New `utils/academic_search.py` queries OpenAlex, Crossref, arXiv, DBLP, Semantic Scholar and PubMed directly, so literature discovery can run without Google Search grounding. It is used automatically when the `light` role is enabled; the `literature_discovery` section selects sources. Records come from the APIs; the `light` model only plans queries and ranks candidates. |
+| Semantic Scholar API key | The key can now be supplied via `model_config.yaml` (`semantic_scholar.api_key`) in addition to `.env`; removed the startup log lines that printed the key (`utils/scholar_utils.py`, `autoraters/citation_f1.py`). |
+| Image MIME detection | `utils/paper_banana_utils.py` now detects image MIME types from magic bytes (PNG/JPEG/GIF/WebP/BMP) instead of hard-coding `image/jpeg`. |
+| CLI startup validation | `paper_writing_cli.py` validates the config and prints the active endpoints on startup, exiting early on invalid config. |
+| Dependencies | Added `PyYAML` to `requirements.txt`. |
+| Repository hygiene | `.gitignore` now excludes `model_config.yaml`, `*.exe`, `doc/`, and `runs/`; local sample outputs and the bundled `pandoc.exe` were removed from version control. |
+| Documentation | This README documents the third-party endpoint setup under [Installation](#installation). |
+
+When no config file is present, or all roles are disabled, behaviour is identical to the original repository: keys and models still come from `.env` and the CLI flags. See [Installation](#installation) for configuration details.
+
 ## Key Features
 
 - **Multi-Agent Pipeline**: Orchestrates specialized agents (Outline, Literature Review, Section Writing, Content Refinement, Plotting) for end-to-end paper generation.
@@ -73,6 +98,44 @@ Acting like an orchestrated team of specialized agents, it handles outline gener
       api_key: "${IMAGE_API_KEY}"
       api_style: "openai"
 
+    literature_discovery:  # used whenever the `light` role is enabled
+      sources: ["openalex", "crossref", "arxiv", "dblp"]  # | semantic_scholar | pubmed
+      timeout: 20              # global defaults, applied to every source
+      max_results_per_source: 10
+      max_candidates: 40
+      max_queries: 3
+
+      openalex:                # no key required
+        mailto: "${OPENALEX_MAILTO}"   # optional polite-pool email
+        max_results: 10
+        timeout: 20
+        min_interval: 0.12
+      crossref:                # no key required
+        mailto: "${CROSSREF_MAILTO}"   # optional polite-pool email
+        max_results: 10
+        timeout: 20
+        min_interval: 0.30
+      arxiv:                   # no key required
+        max_results: 10
+        timeout: 25
+        min_interval: 3.0
+      dblp:                    # no key required
+        max_results: 10
+        timeout: 20
+        min_interval: 1.0
+      semantic_scholar:        # optional but recommended key (HTTP 429)
+        api_key: "${SEMANTIC_SCHOLAR_API_KEY}"
+        max_results: 10
+        timeout: 20
+        min_interval: 1.1
+      pubmed:                  # no key required
+        email: "${PUBMED_EMAIL}"    # optional contact info
+        tool: "paper_orchestra"
+        api_key: "${NCBI_API_KEY}"  # optional; 3 -> 10 requests/second
+        max_results: 10
+        timeout: 20
+        min_interval: 0.40
+
     semantic_scholar:  # optional; anonymous access works with stricter limits
       api_key: "${SEMANTIC_SCHOLAR_API_KEY}"
     ```
@@ -82,9 +145,17 @@ Acting like an orchestrated team of specialized agents, it handles outline gener
     * `api_style` is optional and defaults to `openai`. Use `gemini` for Gemini-compatible endpoints (include the API version in `base_url`, e.g. `https://relay.example.com/v1beta`).
     * Disabled roles or a missing file keep the original `.env` / CLI behaviour.
     * When a role is enabled, its `model_name` overrides the corresponding CLI model flag.
-    * The `semantic_scholar.api_key` value takes precedence over `SEMANTIC_SCHOLAR_API_KEY` in `.env`. Anonymous Semantic Scholar access works but is heavily rate-limited; a free key is recommended.
-    * The `light` role currently only powers two calls: (1) candidate paper discovery in the literature agent (`methods/agents/literature_review_agent.py`, which passes the Google Search tool) and (2) citation-title extraction in `autoraters/citation_f1.py`. It does not write, reflect, plot, evaluate PDFs, or generate images.
-    * **Google Search grounding is Gemini-only.** If `light` uses an `openai`-style endpoint, the discovery call automatically falls back to native Gemini and prints one warning: `WARNING: Role 'light' uses an OpenAI-compatible endpoint, but this call requires Google Search grounding. Falling back to native Gemini for this call.` In that setup `GEMINI_API_KEY` (or Vertex AI credentials) is still required, and the configured `light` endpoint is only used for citation-title extraction — the main generation pipeline does not use it. With `api_style: gemini`, grounding works whenever the relay supports it.
+    * The `semantic_scholar.api_key` value takes precedence over `SEMANTIC_SCHOLAR_API_KEY` in `.env`; `literature_discovery.semantic_scholar.api_key` (if set) takes precedence over both. Anonymous Semantic Scholar access works but is heavily rate-limited; a free key is recommended.
+    * The `light` role currently powers two kinds of calls: candidate paper discovery in the literature agent (`methods/agents/literature_review_agent.py`) and citation-title extraction in `autoraters/citation_f1.py`. It does not write, reflect, plot, evaluate PDFs, or generate images.
+    * **The discovery backend is decided by `light`.** With `light.enabled: false`, discovery uses native Gemini + Google Search grounding (the original behaviour). With `light.enabled: true`, discovery queries academic databases instead, and `light` is only used for tool-free query planning and ranking. In that setup no Gemini/Vertex credentials are needed, and `api_style: openai` works for any OpenAI-compatible endpoint.
+    * **Academic-database discovery.** The `literature_discovery` section only selects and tunes the databases; it has no on/off switch. Titles, authors, venues, abstracts and DOIs come from the APIs, not from the LLM. Sources (all free; only Semantic Scholar has an optional key):
+      * `openalex` — multidisciplinary, broad coverage, abstracts + citation counts; set `mailto` for the polite pool.
+      * `crossref` — authoritative DOI metadata for journals/conferences; abstracts are patchy, may be slow or return HTTP 429.
+      * `arxiv` — CS/physics/math preprints, very recent, abstracts; no citation counts, ~3s between requests.
+      * `dblp` — most accurate CS conference/journal bibliography; no abstracts or citation counts, may be blocked by a bot challenge (skipped with a warning).
+      * `semantic_scholar` — multidisciplinary, abstracts + citation counts; anonymous access is heavily rate-limited, so a free key is recommended.
+      * `pubmed` — biomedical/life sciences; abstracts, DOI and PMID. Skip it for non-biomedical topics.
+    * **Each source has its own optional block** (same key as its name under `literature_discovery`). Every block accepts `max_results`, `timeout` and `min_interval` (seconds between requests); `mailto` is only used by `openalex`/`crossref`, `email`/`tool`/`api_key` by `pubmed`, and `api_key` by `semantic_scholar`. Global `timeout`, `max_results_per_source`, `max_candidates` and `max_queries` act as defaults/limits. Environment fallbacks: `OPENALEX_MAILTO`, `CROSSREF_MAILTO`, `SEMANTIC_SCHOLAR_API_KEY`, `PUBMED_EMAIL`, `NCBI_API_KEY` (or `PUBMED_API_KEY`).
     * Set `PAPER_ORCHESTRA_CONFIG=/path/to/file.yaml` to use a config file outside the project root.
 
 ## Dataset

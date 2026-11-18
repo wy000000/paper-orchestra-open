@@ -9,3 +9,4 @@ paper_output*
 *.exe
 doc/
 runs/
+TinyTeX/

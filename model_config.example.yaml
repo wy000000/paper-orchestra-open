@@ -46,15 +46,13 @@ main:
 # NOTE (light role):
 #   `light` is only used by:
 #     1. candidate paper discovery in the literature agent
-#        (methods/agents/literature_review_agent.py) - this call needs the
-#        Google Search tool;
+#        (methods/agents/literature_review_agent.py);
 #     2. citation-title extraction in autoraters/citation_f1.py.
-#   Google Search grounding is Gemini-only. With `api_style: openai`, the
-#   discovery call automatically falls back to native Gemini and prints one
-#   warning, so GEMINI_API_KEY / Vertex AI credentials are still required.
-#   The configured `light` endpoint is then only used for citation-title
-#   extraction; the main generation pipeline does not use it. Use
-#   `api_style: gemini` if the relay supports grounding.
+#   Candidate discovery uses the Google Search tool only while `light` is
+#   disabled. Once `light` is enabled, discovery queries academic databases
+#   instead and this endpoint is used for plain text-only query planning and
+#   ranking, so any OpenAI-compatible endpoint works and no Gemini credentials
+#   are needed. See `literature_discovery` below to choose the databases.
 light:
   enabled: false
   base_url: "https://api.example.com/v1"
@@ -69,8 +67,85 @@ image:
   api_key: "${IMAGE_API_KEY}"
   api_style: "openai"
 
-# Optional Semantic Scholar API key.
-# Anonymous access works but is heavily rate-limited; a free key raises the
-# limit. The YAML value takes precedence over SEMANTIC_SCHOLAR_API_KEY in .env.
-semantic_scholar:
-  api_key: "${SEMANTIC_SCHOLAR_API_KEY}"
+# Literature-discovery databases.
+#
+# This section is only used when the `light` role is enabled. It never turns
+# academic discovery on or off by itself: with `light.enabled: true`, Phase 1
+# queries the databases below; with `light.enabled: false`, the original
+# Gemini + Google Search grounding path is used.
+#
+# All six sources are free and need no account. Every source has its own
+# optional block; omit a block (or leave it empty) to use the defaults, and
+# remove a source from `sources` if you do not want to query it.
+#
+# Source characteristics:
+#   openalex         - Multidisciplinary; broadest coverage, usually includes
+#                      abstracts and citation counts. Fast. Set `mailto` to
+#                      join the polite pool and avoid rate limits.
+#   crossref         - Authoritative DOI metadata for journals and conference
+#                      proceedings, multidisciplinary. Good venue/volume/pages
+#                      data; abstracts are patchy and responses can be slow or
+#                      return HTTP 429 under load.
+#   arxiv            - CS, physics, math and related preprints; very recent
+#                      work with abstracts. No citation counts, and the API
+#                      asks for ~3 seconds between requests (slower).
+#   dblp             - The most accurate CS conference/journal bibliography
+#                      (great for top-venue papers). No abstracts or citation
+#                      counts; some networks/IPs get a bot challenge (HTTP 202)
+#                      and the source is then skipped with a warning.
+#   semantic_scholar - Multidisciplinary; abstracts and citation counts.
+#                      Anonymous access is heavily rate-limited (HTTP 429), so
+#                      a free API key is strongly recommended.
+#   pubmed           - Biomedical and life sciences; abstracts, DOI and PMID.
+#                      Leave it out for non-biomedical topics.
+literature_discovery:
+  # Available: openalex | crossref | arxiv | dblp | semantic_scholar | pubmed
+  sources: ["openalex", "crossref", "arxiv", "dblp", "semantic_scholar", "pubmed"]
+
+  # Global defaults, applied to every source (each block below can override).
+  timeout: 20                # per-request timeout, seconds
+  max_results_per_source: 10 # records requested from each source per query
+  max_candidates: 40         # records sent to the light model for ranking
+  max_queries: 3             # keyword queries generated per search task
+
+  openalex:                  # no key required
+    mailto: "${OPENALEX_MAILTO}"  # optional polite-pool contact email
+    max_results: 10
+    timeout: 20
+    min_interval: 0.12       # seconds between requests (rate limit)
+
+  crossref:                  # no key required
+    mailto: "${CROSSREF_MAILTO}"  # optional polite-pool contact email
+    max_results: 10
+    timeout: 20
+    min_interval: 0.30
+
+  arxiv:                     # no key required
+    max_results: 10
+    timeout: 25              # arXiv can be slow; 25s minimum is enforced
+    min_interval: 3.0        # arXiv asks for ~3 seconds between requests
+
+  dblp:                      # no key required
+    max_results: 10
+    timeout: 20
+    min_interval: 1.0
+
+  pubmed:                    # no key required
+    email: "${PUBMED_EMAIL}"     # optional; NCBI asks for contact info
+    tool: "paper_orchestra"      # optional; identifies this client to NCBI
+    api_key: "${NCBI_API_KEY}"   # optional; raises NCBI limit from 3 to 10/s
+    max_results: 10
+    timeout: 20
+    min_interval: 0.40
+
+  semantic_scholar:          # free API key strongly recommended (HTTP 429)
+    api_key: "${SEMANTIC_SCHOLAR_API_KEY}"
+    max_results: 10
+    timeout: 20
+    min_interval: 1.1
+    
+  # Optional Semantic Scholar API key for the enrichment path (Phase 1b).
+  # Anonymous access works but is heavily rate-limited; a free key raises the
+  # limit. `literature_discovery.semantic_scholar.api_key` above takes precedence;
+  # this top-level value is the fallback, then SEMANTIC_SCHOLAR_API_KEY in .env.
+
