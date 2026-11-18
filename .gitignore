@@ -1,5 +1,5 @@
-*.mimo
-*.ruff
+*.tmp_*.txt
+.*/
 *.pyc
 *.out
 .env
